@@ -1,6 +1,23 @@
 # KislayPHP EventBus
 
-A PHP extension that provides a Socket.IO-inspired WebSocket server.
+KislayPHP EventBus is a C++ PHP extension that provides a Socket.IO-style realtime server for PHP applications.
+
+## Key Features
+
+- Socket.IO v4 and Engine.IO compatible transport.
+- WebSocket and long-polling support.
+- Rooms and broadcast helpers for fan-out messaging.
+- Configurable ping and payload limits via INI or env.
+
+## Use Cases
+
+- Realtime dashboards and notifications.
+- Low-latency chat or presence features.
+- Event fan-out between PHP services.
+
+## SEO Keywords
+
+PHP realtime, Socket.IO server, WebSocket, Engine.IO, C++ PHP extension, event bus
 
 ## Repository
 
