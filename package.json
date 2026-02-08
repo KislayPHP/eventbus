@@ -1,0 +1,15 @@
+{
+  "name": "kislayphp_eventbus",
+  "version": "1.0.0",
+  "description": "A PHP extension that provides a Socket.IO-inspired WebSocket server.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "socket.io-client": "^4.8.3"
+  }
+}
