@@ -1,6 +1,19 @@
-# kislayphp_eventbus
+# KislayPHP EventBus
 
 A PHP extension that provides a Socket.IO-inspired WebSocket server.
+
+## Repository
+
+- https://github.com/KislayPHP/eventbus
+
+## Related Modules
+
+- https://github.com/KislayPHP/core
+- https://github.com/KislayPHP/discovery
+- https://github.com/KislayPHP/gateway
+- https://github.com/KislayPHP/config
+- https://github.com/KislayPHP/metrics
+- https://github.com/KislayPHP/queue
 
 ## Build
 
@@ -13,7 +26,7 @@ make
 ## Run Locally
 
 ```sh
-cd /path/to/phpExtension/kislay_socket
+cd /path/to/eventbus
 php -d extension=modules/kislay_socket.so example.php
 ```
 
