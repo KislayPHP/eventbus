@@ -32,7 +32,21 @@ PHP realtime, Socket.IO server, WebSocket, Engine.IO, C++ PHP extension, event b
 - https://github.com/KislayPHP/metrics
 - https://github.com/KislayPHP/queue
 
-## Build
+## Installation
+
+### Via PECL
+
+```bash
+pecl install kislayphp_eventbus
+```
+
+Then add to your php.ini:
+
+```ini
+extension=kislayphp_eventbus.so
+```
+
+### Manual Build
 
 ```sh
 phpize

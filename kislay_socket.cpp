@@ -227,7 +227,11 @@ static zend_object *kislay_socket_server_create_object(zend_class_entry *ce) {
     server->cors_enabled = kislay_env_bool("KISLAYPHP_EVENTBUS_CORS", KISLAYPHP_EVENTBUS_G(cors_enabled) != 0);
     server->ping_interval_ms = static_cast<int>(kislay_env_long("KISLAYPHP_EVENTBUS_PING_INTERVAL_MS", KISLAYPHP_EVENTBUS_G(ping_interval_ms)));
     server->ping_timeout_ms = static_cast<int>(kislay_env_long("KISLAYPHP_EVENTBUS_PING_TIMEOUT_MS", KISLAYPHP_EVENTBUS_G(ping_timeout_ms)));
-    server->max_payload = static_cast<size_t>(kislay_env_long("KISLAYPHP_EVENTBUS_MAX_PAYLOAD", KISLAYPHP_EVENTBUS_G(max_payload)));
+    zend_long max_payload = kislay_env_long("KISLAYPHP_EVENTBUS_MAX_PAYLOAD", KISLAYPHP_EVENTBUS_G(max_payload));
+    if (max_payload < 0) {
+        max_payload = 0;
+    }
+    server->max_payload = static_cast<size_t>(max_payload);
 
     std::string query_keys = kislay_env_string("KISLAYPHP_AUTH_QUERY_KEYS", KISLAYPHP_EVENTBUS_G(auth_query_keys) ? KISLAYPHP_EVENTBUS_G(auth_query_keys) : "");
     std::string header_keys = kislay_env_string("KISLAYPHP_AUTH_HEADER_KEYS", KISLAYPHP_EVENTBUS_G(auth_header_keys) ? KISLAYPHP_EVENTBUS_G(auth_header_keys) : "");
@@ -316,6 +320,9 @@ static std::string kislay_to_lower(const std::string &value) {
 }
 
 static std::string kislay_url_decode(const std::string &value) {
+    if (value.empty()) {
+        return "";
+    }
     std::string out = value;
     size_t new_len = php_url_decode(&out[0], out.size());
     out.resize(new_len);
@@ -886,6 +893,9 @@ static bool kislay_validate_auth(php_kislay_socket_server_t *server,
                                  const std::unordered_map<std::string, std::string> &query) {
     if (!server->auth_enabled) {
         return true;
+    }
+    if (server->auth_token.empty()) {
+        return false;
     }
 
     std::string token;
