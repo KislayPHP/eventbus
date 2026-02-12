@@ -5,7 +5,7 @@
 [![Build Status](https://img.shields.io/github/actions/workflow/status/KislayPHP/eventbus/ci.yml)](https://github.com/KislayPHP/eventbus/actions)
 [![codecov](https://codecov.io/gh/KislayPHP/eventbus/branch/main/graph/badge.svg)](https://codecov.io/gh/KislayPHP/eventbus)
 
-A high-performance C++ PHP extension providing Socket.IO-compatible realtime communication for building interactive applications and microservices.
+A high-performance C++ PHP extension providing Socket.IO-compatible realtime communication for building interactive applications and microservices. Perfect for PHP echo system integration and modern microservices architecture.
 
 ## ⚡ Key Features
 
@@ -16,6 +16,8 @@ A high-performance C++ PHP extension providing Socket.IO-compatible realtime com
 - 📡 **Broadcasting**: Efficient event fan-out to multiple clients
 - 🔧 **Configurable**: Environment-based configuration and INI settings
 - 📊 **Monitoring**: Connection tracking and performance metrics
+- 🔄 **PHP Echo System**: Seamless integration with PHP ecosystem and frameworks
+- 🌐 **Microservices Architecture**: Designed for distributed PHP applications
 
 ## 📦 Installation
 
@@ -292,3 +294,9 @@ $io->listen('0.0.0.0', 8090, '/socket.io/');
 // This call blocks; stop with Ctrl+C.
 ?>
 ```
+
+## SEO Keywords
+
+PHP, microservices, PHP echo system, PHP extension, C++ PHP extension, Socket.IO PHP, WebSocket PHP, real-time PHP, PHP event bus, PHP messaging, PHP namespaces, PHP rooms, PHP broadcasting, interactive PHP applications, PHP microservices communication
+
+---
