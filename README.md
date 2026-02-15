@@ -21,10 +21,10 @@ A high-performance C++ PHP extension providing Socket.IO-compatible realtime com
 
 ## 📦 Installation
 
-### Via PECL (Recommended)
+### Via PIE (Recommended)
 
 ```bash
-pecl install kislayphp_eventbus
+pie install kislayphp/eventbus
 ```
 
 Add to your `php.ini`:
@@ -48,7 +48,6 @@ sudo make install
 
 ```dockerfile
 FROM php:8.2-cli
-RUN pecl install kislayphp_eventbus && docker-php-ext-enable kislayphp_eventbus
 ```
 
 ## 🚀 Quick Start
@@ -242,10 +241,10 @@ Licensed under the [Apache License 2.0](LICENSE).
 
 ## Installation
 
-### Via PECL
+### Via PIE
 
 ```bash
-pecl install kislayphp_eventbus
+pie install kislayphp/eventbus
 ```
 
 Then add to your php.ini:

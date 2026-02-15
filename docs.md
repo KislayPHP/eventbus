@@ -21,9 +21,9 @@ The KislayPHP EventBus extension provides high-performance event-driven messagin
 
 ## Installation
 
-### Via PECL
+### Via PIE
 ```bash
-pecl install kislayphp_eventbus
+pie install kislayphp/eventbus
 ```
 
 ### Manual Build
