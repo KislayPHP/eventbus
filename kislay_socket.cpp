@@ -1367,6 +1367,36 @@ PHP_METHOD(KislaySocketServer, emit) {
     RETURN_TRUE;
 }
 
+PHP_METHOD(KislaySocketServer, publish) {
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *data = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    std::lock_guard<std::mutex> guard(server->lock);
+    kislay_broadcast(server, std::string(event, event_len), data);
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislaySocketServer, send) {
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *data = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    std::lock_guard<std::mutex> guard(server->lock);
+    kislay_broadcast(server, std::string(event, event_len), data);
+    RETURN_TRUE;
+}
+
 PHP_METHOD(KislaySocketServer, emitTo) {
     char *room = nullptr;
     size_t room_len = 0;
@@ -1580,10 +1610,81 @@ PHP_METHOD(KislaySocketClient, emitTo) {
     RETURN_TRUE;
 }
 
+PHP_METHOD(KislaySocketClient, publish) {
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *data = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(Z_OBJ_P(getThis()));
+    if (client->server == nullptr) {
+        RETURN_FALSE;
+    }
+
+    std::lock_guard<std::mutex> guard(client->server->lock);
+    auto cit = client->server->clients.find(client->sid);
+    if (cit == client->server->clients.end()) {
+        RETURN_FALSE;
+    }
+    kislay_send_socketio_event(client->server, client->sid, std::string(event, event_len), data);
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislaySocketClient, send) {
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *data = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(Z_OBJ_P(getThis()));
+    if (client->server == nullptr) {
+        RETURN_FALSE;
+    }
+
+    std::lock_guard<std::mutex> guard(client->server->lock);
+    auto cit = client->server->clients.find(client->sid);
+    if (cit == client->server->clients.end()) {
+        RETURN_FALSE;
+    }
+    kislay_send_socketio_event(client->server, client->sid, std::string(event, event_len), data);
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislaySocketClient, reply) {
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *data = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(Z_OBJ_P(getThis()));
+    if (client->server == nullptr) {
+        RETURN_FALSE;
+    }
+
+    std::lock_guard<std::mutex> guard(client->server->lock);
+    auto cit = client->server->clients.find(client->sid);
+    if (cit == client->server->clients.end()) {
+        RETURN_FALSE;
+    }
+    kislay_send_socketio_event(client->server, client->sid, std::string(event, event_len), data);
+    RETURN_TRUE;
+}
+
 static const zend_function_entry kislay_socket_server_methods[] = {
     PHP_ME(KislaySocketServer, __construct, arginfo_kislay_socket_void, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, on, arginfo_kislay_socket_on, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, emit, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, publish, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, send, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, emitTo, arginfo_kislay_socket_emit_room, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, listen, arginfo_kislay_socket_listen, ZEND_ACC_PUBLIC)
     PHP_FE_END
@@ -1594,6 +1695,9 @@ static const zend_function_entry kislay_socket_client_methods[] = {
     PHP_ME(KislaySocketClient, join, arginfo_kislay_socket_join, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketClient, leave, arginfo_kislay_socket_join, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketClient, emit, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketClient, publish, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketClient, send, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketClient, reply, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketClient, emitTo, arginfo_kislay_socket_emit_room, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
