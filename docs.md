@@ -845,8 +845,8 @@ class EventStore {
 
     public function __construct(string $storageType = 'memory') {
         switch ($storageType) {
-            case 'redis':
-                $this->storage = new RedisEventStorage();
+            case 'KV store':
+                $this->storage = new KeyValueStoreEventStorage();
                 break;
             case 'database':
                 $this->storage = new DatabaseEventStorage();
@@ -1076,7 +1076,7 @@ class ClusteredEventBus extends EventBus {
     }
 
     private function redistributeConnections(string $nodeId): void {
-        // Redistribute connections from failed node
+        // redistribute connections from failed node
         $connections = $this->getConnectionsForNode($nodeId);
 
         foreach ($connections as $connection) {
@@ -1125,7 +1125,7 @@ $clusteredBus->start();
 
 ## Integration Examples
 
-### Laravel Broadcasting Integration
+### KislayPHP Broadcasting Integration
 ```php
 <?php
 // config/broadcasting.php
@@ -1176,11 +1176,11 @@ Broadcast::extend('kislayphp', function($app, $config) {
 });
 ```
 
-### Symfony Messenger Integration
+### Framework Message Bus Integration
 ```php
 <?php
 // src/Messenger/Transport/KislayPHPTransport.php
-class KislayPHPTransport implements Symfony\\Component\\Messenger\\Transport\\TransportInterface {
+class KislayPHPTransport implements Framework\\Component\\Messenger\\Transport\\TransportInterface {
     private $publisher;
     private $subscriber;
 

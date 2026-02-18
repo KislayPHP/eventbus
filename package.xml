@@ -6,8 +6,8 @@
          xsi:schemaLocation="http://pear.php.net/dtd/package-2.0 http://pear.php.net/dtd/package-2.0.xsd">
   <name>kislayphp_eventbus</name>
   <channel>pecl.php.net</channel>
-  <summary>KislayPHP EventBus provides Socket.IO-style realtime messaging.</summary>
-  <description>KislayPHP EventBus provides Socket.IO-style realtime messaging. Part of the KislayPHP suite.</description>
+  <summary>KislayPHP EventBus provides realtime event style realtime messaging.</summary>
+  <description>KislayPHP EventBus provides realtime event style realtime messaging. Part of the KislayPHP suite.</description>
   <lead>
     <name>kislay kumar</name>
     <user>kislaykumar</user>

@@ -5,18 +5,18 @@
 [![Build Status](https://img.shields.io/github/actions/workflow/status/KislayPHP/eventbus/ci.yml)](https://github.com/KislayPHP/eventbus/actions)
 [![codecov](https://codecov.io/gh/KislayPHP/eventbus/branch/main/graph/badge.svg)](https://codecov.io/gh/KislayPHP/eventbus)
 
-A high-performance C++ PHP extension providing Socket.IO-compatible realtime communication for building interactive applications and microservices. Perfect for PHP echo system integration and modern microservices architecture.
+A high-performance C++ PHP extension providing realtime event protocol-compatible realtime communication for building interactive applications and microservices. Perfect for PHP ecosystem integration and modern microservices architecture.
 
 ## ⚡ Key Features
 
 - 🚀 **High Performance**: Real-time messaging with minimal latency
-- 🔌 **Socket.IO Compatible**: Full Socket.IO v4 and Engine.IO support
+- 🔌 **realtime event protocol Compatible**: Full realtime event protocol v4 and Engine.IO support
 - 🌐 **Multiple Transports**: WebSocket, HTTP long-polling, and Server-Sent Events
 - 🏠 **Room Management**: Namespaces and rooms for organized messaging
 - 📡 **Broadcasting**: Efficient event fan-out to multiple clients
 - 🔧 **Configurable**: Environment-based configuration and INI settings
 - 📊 **Monitoring**: Connection tracking and performance metrics
-- 🔄 **PHP Echo System**: Seamless integration with PHP ecosystem and frameworks
+- 🔄 **PHP Ecosystem**: Seamless integration with PHP ecosystem and frameworks
 - 🌐 **Microservices Architecture**: Designed for distributed PHP applications
 
 ## 📦 Installation
@@ -44,9 +44,9 @@ make
 sudo make install
 ```
 
-### Docker
+### container
 
-```dockerfile
+```containerfile
 FROM php:8.2-cli
 ```
 
@@ -91,31 +91,23 @@ $eventbus->listen('0.0.0.0', 3000);
 ### Client Usage (JavaScript)
 
 ```javascript
-import io from 'socket.io-client';
+const socket = new WebSocket('ws://localhost:3000/events/?transport=websocket');
 
-const socket = io('http://localhost:3000');
-
-// Connect to server
-socket.on('connect', () => {
+socket.addEventListener('open', () => {
     console.log('Connected to EventBus server');
-
-    // Join a room
-    socket.emit('join room', 'general');
-
-    // Send messages
-    socket.emit('chat message', {
+    socket.send(JSON.stringify({ type: 'join room', room: 'general' }));
+    socket.send(JSON.stringify({
+        type: 'chat message',
         message: 'Hello from client!',
         timestamp: Date.now()
-    });
+    }));
 });
 
-// Receive messages
-socket.on('chat message', (data) => {
-    console.log('Received:', data);
+socket.addEventListener('message', (event) => {
+    console.log('Received:', event.data);
 });
 
-// Handle disconnections
-socket.on('disconnect', () => {
+socket.addEventListener('close', () => {
     console.log('Disconnected from server');
 });
 ```
@@ -197,9 +189,8 @@ export KISLAYPHP_EVENTBUS_ENABLE_WEBSOCKET=1
 # Run unit tests
 php run-tests.php
 
-# Test with Socket.IO client
+# Test with a JavaScript WebSocket client
 cd tests/
-npm install socket.io-client
 node test_client.js
 ```
 
@@ -220,15 +211,15 @@ Licensed under the [Apache License 2.0](LICENSE).
 
 ## 📈 Roadmap
 
-- [ ] Socket.IO v5 support
+- [ ] Realtime protocol v5 support
 - [ ] Binary message support
-- [ ] Redis adapter for clustering
+- [ ] KV store adapter for clustering
 - [ ] Message persistence
 - [ ] Advanced authentication middleware
 
 ## 🙏 Acknowledgments
 
-- **Socket.IO**: Real-time communication protocol
+- **realtime event protocol**: Real-time communication protocol
 - **Engine.IO**: Transport layer implementation
 - **PHP**: Zend API for extension development
 
@@ -289,13 +280,13 @@ $io->on('binary', function ($socket, $payload) {
     $socket->emit('binary', $payload);
 });
 
-$io->listen('0.0.0.0', 8090, '/socket.io/');
+$io->listen('0.0.0.0', 8090, '/realtime-protocol/');
 // This call blocks; stop with Ctrl+C.
 ?>
 ```
 
 ## SEO Keywords
 
-PHP, microservices, PHP echo system, PHP extension, C++ PHP extension, Socket.IO PHP, WebSocket PHP, real-time PHP, PHP event bus, PHP messaging, PHP namespaces, PHP rooms, PHP broadcasting, interactive PHP applications, PHP microservices communication
+PHP, microservices, PHP ecosystem, PHP extension, C++ PHP extension, realtime event protocol PHP, WebSocket PHP, real-time PHP, PHP event bus, PHP messaging, PHP namespaces, PHP rooms, PHP broadcasting, interactive PHP applications, PHP microservices communication
 
 ---

@@ -20,7 +20,7 @@ $io->on('binary', function ($socket, $payload) {
     $socket->emit('binary', $payload);
 });
 
-$io->listen('0.0.0.0', 8090, '/socket.io/');
+$io->listen('0.0.0.0', 8090, '/events/');
 
 // This call blocks; stop with Ctrl+C.
 

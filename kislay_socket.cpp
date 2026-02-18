@@ -10,12 +10,14 @@ extern "C" {
 
 #include "php_kislay_socket.h"
 
+#include <chrono>
 #include <civetweb.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <mutex>
 #include <new>
@@ -24,6 +26,15 @@ extern "C" {
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "Zend/zend_smart_str.h"
+#include "ext/standard/php_var.h"
+
+#ifdef KISLAYPHP_RPC
+#include <grpcpp/grpcpp.h>
+
+#include "platform.grpc.pb.h"
+#endif
 
 static std::string kislay_to_lower(const std::string &value);
 
@@ -56,6 +67,89 @@ static std::string kislay_env_string(const char *name, const std::string &fallba
     }
     return std::string(value);
 }
+
+#ifdef KISLAYPHP_RPC
+static bool kislay_rpc_enabled() {
+    return kislay_env_bool("KISLAY_RPC_ENABLED", false);
+}
+
+static zend_long kislay_rpc_timeout_ms() {
+    zend_long timeout = kislay_env_long("KISLAY_RPC_TIMEOUT_MS", 200);
+    return timeout > 0 ? timeout : 200;
+}
+
+static std::string kislay_rpc_platform_endpoint() {
+    return kislay_env_string("KISLAY_RPC_PLATFORM_ENDPOINT", "127.0.0.1:9100");
+}
+
+static bool kislay_serialize_payload(zval *payload, std::string &out) {
+    smart_str buffer = {0};
+    php_serialize_data_t var_hash;
+    PHP_VAR_SERIALIZE_INIT(var_hash);
+    php_var_serialize(&buffer, payload, &var_hash);
+    PHP_VAR_SERIALIZE_DESTROY(var_hash);
+    if (buffer.s == nullptr) {
+        return false;
+    }
+    out.assign(ZSTR_VAL(buffer.s), ZSTR_LEN(buffer.s));
+    smart_str_free(&buffer);
+    return true;
+}
+
+static kislay::platform::v1::EventBusService::Stub *kislay_rpc_eventbus_stub(const std::string &endpoint) {
+    static std::mutex lock;
+    static std::string cached_endpoint;
+    static std::shared_ptr<grpc::Channel> channel;
+    static std::unique_ptr<kislay::platform::v1::EventBusService::Stub> stub;
+    std::lock_guard<std::mutex> guard(lock);
+    if (!stub || cached_endpoint != endpoint) {
+        channel = grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials());
+        stub = kislay::platform::v1::EventBusService::NewStub(channel);
+        cached_endpoint = endpoint;
+    }
+    return stub.get();
+}
+
+static bool kislay_rpc_publish(const std::string &topic, zval *payload, std::string *error) {
+    auto *stub = kislay_rpc_eventbus_stub(kislay_rpc_platform_endpoint());
+    if (!stub) {
+        if (error) {
+            *error = "RPC stub unavailable";
+        }
+        return false;
+    }
+
+    std::string payload_bytes;
+    if (!kislay_serialize_payload(payload, payload_bytes)) {
+        if (error) {
+            *error = "Payload serialize failed";
+        }
+        return false;
+    }
+
+    kislay::platform::v1::PublishRequest request;
+    request.set_topic(topic);
+    request.set_payload(payload_bytes);
+    kislay::platform::v1::PublishResponse response;
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(kislay_rpc_timeout_ms()));
+
+    grpc::Status status = stub->Publish(&context, request, &response);
+    if (!status.ok()) {
+        if (error) {
+            *error = status.error_message();
+        }
+        return false;
+    }
+    if (!response.ok()) {
+        if (error) {
+            *error = response.error();
+        }
+        return false;
+    }
+    return true;
+}
+#endif
 
 static void kislay_parse_csv(const std::string &value, std::vector<std::string> &out) {
     out.clear();
@@ -1362,6 +1456,14 @@ PHP_METHOD(KislaySocketServer, emit) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string error;
+        if (kislay_rpc_publish(std::string(event, event_len), data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     std::lock_guard<std::mutex> guard(server->lock);
     kislay_broadcast(server, std::string(event, event_len), data);
     RETURN_TRUE;
@@ -1377,6 +1479,14 @@ PHP_METHOD(KislaySocketServer, publish) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string error;
+        if (kislay_rpc_publish(std::string(event, event_len), data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     std::lock_guard<std::mutex> guard(server->lock);
     kislay_broadcast(server, std::string(event, event_len), data);
     RETURN_TRUE;
@@ -1392,6 +1502,14 @@ PHP_METHOD(KislaySocketServer, send) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string error;
+        if (kislay_rpc_publish(std::string(event, event_len), data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     std::lock_guard<std::mutex> guard(server->lock);
     kislay_broadcast(server, std::string(event, event_len), data);
     RETURN_TRUE;
@@ -1410,6 +1528,17 @@ PHP_METHOD(KislaySocketServer, emitTo) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string topic(room, room_len);
+        topic.append(":");
+        topic.append(std::string(event, event_len));
+        std::string error;
+        if (kislay_rpc_publish(topic, data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     std::lock_guard<std::mutex> guard(server->lock);
     kislay_emit_room(server, std::string(room, room_len), std::string(event, event_len), data);
     RETURN_TRUE;
@@ -1575,6 +1704,14 @@ PHP_METHOD(KislaySocketClient, emit) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string error;
+        if (kislay_rpc_publish(std::string(event, event_len), data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     if (client->server == nullptr) {
         RETURN_FALSE;
     }
@@ -1601,6 +1738,17 @@ PHP_METHOD(KislaySocketClient, emitTo) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string topic(room, room_len);
+        topic.append(":");
+        topic.append(std::string(event, event_len));
+        std::string error;
+        if (kislay_rpc_publish(topic, data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     if (client->server == nullptr) {
         RETURN_FALSE;
     }
@@ -1620,6 +1768,14 @@ PHP_METHOD(KislaySocketClient, publish) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string error;
+        if (kislay_rpc_publish(std::string(event, event_len), data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     if (client->server == nullptr) {
         RETURN_FALSE;
     }
@@ -1643,6 +1799,14 @@ PHP_METHOD(KislaySocketClient, send) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string error;
+        if (kislay_rpc_publish(std::string(event, event_len), data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     if (client->server == nullptr) {
         RETURN_FALSE;
     }
@@ -1666,6 +1830,14 @@ PHP_METHOD(KislaySocketClient, reply) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(Z_OBJ_P(getThis()));
+#ifdef KISLAYPHP_RPC
+    if (kislay_rpc_enabled()) {
+        std::string error;
+        if (kislay_rpc_publish(std::string(event, event_len), data, &error)) {
+            RETURN_TRUE;
+        }
+    }
+#endif
     if (client->server == nullptr) {
         RETURN_FALSE;
     }

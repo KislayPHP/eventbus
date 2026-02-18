@@ -1,6 +1,6 @@
 {
     "name": "kislayphp/eventbus",
-    "description": "High-performance C++ PHP extension providing Socket.IO-compatible realtime communication for PHP microservices",
+    "description": "High-performance C++ PHP extension providing realtime event protocol-compatible realtime communication for PHP microservices",
     "type": "php-ext",
     "license": "Apache-2.0",
     "keywords": [
@@ -8,7 +8,7 @@
         "microservices",
         "php-extension",
         "cpp-extension",
-        "socket.io",
+        "realtime-protocol",
         "websocket",
         "real-time",
         "php-eventbus",
