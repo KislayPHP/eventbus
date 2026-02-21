@@ -7,6 +7,9 @@
 
 A high-performance C++ PHP extension providing realtime event protocol-compatible realtime communication for building interactive applications and microservices. Perfect for PHP ecosystem integration and modern microservices architecture.
 
+Primary runtime namespace is `Kislay\EventBus` (legacy `KislayPHP\EventBus` aliases are kept for compatibility).
+For service-to-service event patterns, see `SERVICE_COMMUNICATION.md` and `service_communication.php`.
+
 ## ⚡ Key Features
 
 - 🚀 **High Performance**: Real-time messaging with minimal latency

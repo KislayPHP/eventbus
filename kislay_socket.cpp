@@ -1878,15 +1878,17 @@ PHP_MINIT_FUNCTION(kislayphp_eventbus) {
     REGISTER_INI_ENTRIES();
     zend_class_entry ce;
 
-    INIT_NS_CLASS_ENTRY(ce, "KislayPHP\\EventBus", "Server", kislay_socket_server_methods);
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\EventBus", "Server", kislay_socket_server_methods);
     kislay_socket_server_ce = zend_register_internal_class(&ce);
+    zend_register_class_alias("KislayPHP\\EventBus\\Server", kislay_socket_server_ce);
     kislay_socket_server_ce->create_object = kislay_socket_server_create_object;
     std::memcpy(&kislay_socket_server_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_socket_server_handlers.offset = XtOffsetOf(php_kislay_socket_server_t, std);
     kislay_socket_server_handlers.free_obj = kislay_socket_server_free_obj;
 
-    INIT_NS_CLASS_ENTRY(ce, "KislayPHP\\EventBus", "Socket", kislay_socket_client_methods);
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\EventBus", "Socket", kislay_socket_client_methods);
     kislay_socket_client_ce = zend_register_internal_class(&ce);
+    zend_register_class_alias("KislayPHP\\EventBus\\Socket", kislay_socket_client_ce);
     kislay_socket_client_ce->create_object = kislay_socket_client_create_object;
     std::memcpy(&kislay_socket_client_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_socket_client_handlers.offset = XtOffsetOf(php_kislay_socket_client_t, std);

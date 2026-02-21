@@ -5,7 +5,7 @@
 
 extension_loaded('kislayphp_eventbus') or die('kislayphp_eventbus not loaded');
 
-$io = new KislayPHP\EventBus\Server();
+$io = new Kislay\EventBus\Server();
 
 $io->on('connection', function ($socket) {
     $socket->join('room-1');

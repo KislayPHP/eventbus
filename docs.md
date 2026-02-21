@@ -1,5 +1,8 @@
 # KislayPHP EventBus Extension Documentation
 
+Primary namespace is `Kislay\EventBus` with backward-compatible aliases under `KislayPHP\EventBus`.
+See `SERVICE_COMMUNICATION.md` for service event patterns.
+
 ## Overview
 
 The KislayPHP EventBus extension provides high-performance event-driven messaging with support for WebSocket connections, TCP sockets, and pluggable transport protocols. It enables real-time communication between services and clients with features like pub/sub messaging, event filtering, and connection management.
