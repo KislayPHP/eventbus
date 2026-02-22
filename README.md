@@ -118,6 +118,8 @@ socket.addEventListener('close', () => {
 ## 📚 Documentation
 
 📖 **[Complete Documentation](docs.md)** - API reference, configuration, examples, and best practices
+- 📘 **[Class Reference](CLASS_REFERENCE.md)** - EventBus classes and socket/server methods
+- 🚀 **[Deployment Guide](https://github.com/KislayPHP/core/blob/main/docs/DEPLOYMENT_GUIDE_MULTI_ENV.md)** - Docker/AWS/cloud/on-prem runbook
 
 ## 🏗️ Architecture
 
