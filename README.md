@@ -27,7 +27,7 @@ For service-to-service event patterns, see `SERVICE_COMMUNICATION.md` and `servi
 ### Via PIE (Recommended)
 
 ```bash
-pie install kislayphp/eventbus
+pie install kislayphp/eventbus:0.0.2
 ```
 
 Add to your `php.ini`:

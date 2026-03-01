@@ -5,7 +5,7 @@ extern "C" {
 #include "php.h"
 }
 
-#define PHP_KISLAYPHP_EVENTBUS_VERSION "0.0.1"
+#define PHP_KISLAYPHP_EVENTBUS_VERSION "0.0.2"
 #define PHP_KISLAYPHP_EVENTBUS_EXTNAME "kislayphp_eventbus"
 
 extern zend_module_entry kislayphp_eventbus_module_entry;
