@@ -1,152 +1,123 @@
 # KislayPHP EventBus
 
-[![PHP Version](https://img.shields.io/badge/PHP-8.2%2B-blue.svg)](https://php.net)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/KislayPHP/eventbus/ci.yml?branch=main&label=CI)](https://github.com/KislayPHP/eventbus/actions)
-[![PIE](https://img.shields.io/badge/install-pie-blueviolet)](https://github.com/php/pie)
+> Compatibility transport package for the older Kislay realtime transport name.
 
-> **Realtime event transport for PHP.** WebSocket-style rooms, fanout, and push — all as a native PHP extension. No Node.js, no socket.io server, no separate process.
+`kislayphp/eventbus` remains published on the `0.0.x` line so existing transport installs can continue to work. New transport work should start on [`kislayphp/socket`](https://github.com/KislayPHP/socket).
 
-Part of the [KislayPHP ecosystem](https://skelves.com/kislayphp/docs).
+## Current Role
 
----
+Use `eventbus` only when:
 
-## ✨ What It Does
+- an existing service is already pinned to `kislayphp/eventbus:0.0.3`
+- existing code already imports `Kislay\EventBus\Server` or `Kislay\EventBus\Socket`
+- you want the lowest-risk migration path before moving code to `Kislay\Socket\...`
 
-`kislayphp/eventbus` is a PHP C++ extension providing a realtime event server. Clients connect over WebSocket-compatible sockets, join named rooms, and receive server-pushed events. The API mirrors socket.io semantics in pure PHP.
+Use `socket` for new installs when you need:
 
-```php
-<?php
-$server = new Kislay\EventBus\Server();
+- realtime browser or service socket connections
+- Engine.IO polling and WebSocket upgrade
+- rooms and namespaces
+- per-client replies and room fanout
 
-$server->on('connection', function(Kislay\EventBus\Socket $socket) use ($server) {
-    $socket->join('general');
-    $server->on('chat', fn($client, $msg) => $server->emitTo('general', 'chat', $msg));
-});
+## Installation
 
-$server->listen('0.0.0.0', 3000, '/events/');
-```
-
----
-
-## 📦 Installation
+### Compatibility install
 
 ```bash
-pie install kislayphp/eventbus
+pie install kislayphp/eventbus:0.0.3
 ```
 
-Enable in `php.ini`:
+Enable it in `php.ini`:
+
 ```ini
 extension=kislayphp_eventbus.so
 ```
 
----
+### Forward install for new transport work
 
-## 🚀 Quick Start
+```bash
+pie install kislayphp/socket:0.0.1
+```
 
-### Chat Room Server
+## Minimal Compatibility Example
 
 ```php
 <?php
+
 $server = new Kislay\EventBus\Server();
 
-$server->on('connection', function(Kislay\EventBus\Socket $socket) use ($server) {
-    echo "[connect] " . $socket->id() . "\n";
-
-    // Auto-join the general room
+$server->on('connection', function (Kislay\EventBus\Socket $socket) {
     $socket->join('general');
+    $socket->reply('connected', ['id' => $socket->id()]);
+});
 
-    // Acknowledge connection
-    $socket->reply('connected', [
-        'id'    => $socket->id(),
-        'room'  => 'general',
-        'users' => count_online(),
+$server->on('chat', function (Kislay\EventBus\Socket $socket, array $payload) {
+    $socket->emitTo('general', 'chat', [
+        'from' => $socket->id(),
+        'message' => $payload['message'] ?? '',
     ]);
-
-    // Broadcast chat messages to the room
-    $server->on('chat', function(Kislay\EventBus\Socket $client, $payload) use ($server) {
-        $server->emitTo('general', 'chat', [
-            'from'    => $client->id(),
-            'message' => $payload['text'],
-            'ts'      => time(),
-        ]);
-    });
-
-    // Handle room switching
-    $server->on('join-room', function(Kislay\EventBus\Socket $client, $payload) {
-        $client->leave('general');
-        $client->join($payload['room']);
-        $client->reply('room-joined', ['room' => $payload['room']]);
-    });
 });
 
-$server->listen('0.0.0.0', 3000, '/events/');
+$server->listen('0.0.0.0', 3000, '/socket.io/');
 ```
 
-### Notification Push Server
+## Public API
 
-```php
-<?php
-$server = new Kislay\EventBus\Server();
+### `Kislay\EventBus\Server`
 
-$server->on('connection', function(Kislay\EventBus\Socket $socket) {
-    // Client provides their user ID
-    $socket->on('auth', function($data) use ($socket) {
-        $socket->join("user-{$data['user_id']}");
-    });
-});
+- `on(string $event, callable $handler): bool`
+- `emit(string $event, mixed $data): bool`
+- `publish(string $event, mixed $data): bool`
+- `send(string $event, mixed $data): bool`
+- `emitTo(string $room, string $event, mixed $data): bool`
+- `listen(string $host, int $port, string $path): bool`
+- `clientCount(): int`
+- `roomCount(string $room): int`
+- `onAuth(callable $handler): bool`
+- `onWithAck(string $event, callable $handler): bool`
+- `getClients(): array`
+- `setMaxPayload(int $bytes): bool`
+- `namespace(string $ns): Kislay\EventBus\Namespace`
 
-// Push notification to specific user (from anywhere in your app)
-function notify(Kislay\EventBus\Server $server, int $userId, array $data): void {
-    $server->emitTo("user-{$userId}", 'notification', $data);
-}
-```
+### `Kislay\EventBus\Socket`
 
----
+- `id(): string`
+- `join(string $room): bool`
+- `leave(string $room): bool`
+- `emit(string $event, mixed $data): bool`
+- `publish(string $event, mixed $data): bool`
+- `send(string $event, mixed $data): bool`
+- `reply(string $event, mixed $data): bool`
+- `emitTo(string $room, string $event, mixed $data): bool`
 
-## 📖 Public API
+Semantics:
 
-```php
-namespace Kislay\EventBus;
+- `Server::emit()` broadcasts to all connected clients.
+- `Socket::emit()` sends only to the current client.
+- `Socket::reply()` is the semantic alias for per-client emit.
+- `Socket::emitTo()` broadcasts to a room.
 
-class Server {
-    public function __construct();
-    public function on(string $event, callable $handler): bool;
-    public function emit(string $event, mixed $data): bool;          // broadcast to all
-    public function publish(string $event, mixed $data): bool;       // alias for emit
-    public function send(string $event, mixed $data): bool;          // alias for emit
-    public function emitTo(string $room, string $event, mixed $data): bool;
-    public function listen(string $host, int $port, string $path): bool;
-}
+Legacy aliases under `KislayPHP\EventBus\...` remain available.
 
-class Socket {
-    public function id(): string;
-    public function join(string $room): bool;
-    public function leave(string $room): bool;
-    public function emit(string $event, mixed $data): bool;          // to all
-    public function reply(string $event, mixed $data): bool;         // to this socket only
-    public function emitTo(string $room, string $event, mixed $data): bool;
-}
-```
+## Positioning
 
-Legacy aliases: `KislayPHP\EventBus\Server`, `KislayPHP\EventBus\Socket`
+Use `eventbus` only as the compatibility package during the `0.0.x` transport split.
 
----
+Use `queue` for:
 
-## 💡 When to Use Each Extension
+- background jobs
+- retries and DLQ
+- worker/server queue processing
 
-| Need | Use |
-|---|---|
-| Realtime push to connected browser clients | **eventbus** (this) |
-| Async background task processing | [core](https://github.com/KislayPHP/core) `async()` |
-| Reliable job queue with retry | [queue](https://github.com/KislayPHP/queue) |
+Use `socket` for:
 
----
+- new realtime transport work
+- rooms and namespaces
+- polling and WebSocket upgrade
+- transport-facing docs and onboarding
 
-## 🔗 Ecosystem
+## Documentation
 
-[core](https://github.com/KislayPHP/core) · [gateway](https://github.com/KislayPHP/gateway) · [discovery](https://github.com/KislayPHP/discovery) · [metrics](https://github.com/KislayPHP/metrics) · [queue](https://github.com/KislayPHP/queue) · **eventbus**
-
-## 📄 License
-
-[Apache License 2.0](LICENSE) · **[Full Docs](https://skelves.com/kislayphp/docs)**
+- Socket docs: [https://skelves.com/kislayphp/docs/socket](https://skelves.com/kislayphp/docs/socket)
+- EventBus compatibility docs: [https://skelves.com/kislayphp/docs/eventbus](https://skelves.com/kislayphp/docs/eventbus)
+- Ecosystem docs: [https://skelves.com/kislayphp/docs](https://skelves.com/kislayphp/docs)
