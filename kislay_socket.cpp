@@ -275,6 +275,7 @@ typedef struct _php_kislay_socket_server_t {
     int ping_interval_ms;
     int ping_timeout_ms;
     size_t max_payload;
+    int thread_count; // 0 = use env/default
 } php_kislay_socket_server_t;
 
 typedef struct _php_kislay_socket_client_t {
@@ -312,6 +313,7 @@ static zend_object *kislay_socket_server_create_object(zend_class_entry *ce) {
     new (&server->counter) std::atomic<uint64_t>(0);
     server->ctx = nullptr;
     server->running = false;
+    server->thread_count = 0;
     server->auth_enabled = kislay_env_bool("KISLAYPHP_AUTH_ENABLED", KISLAYPHP_EVENTBUS_G(auth_enabled) != 0);
     new (&server->auth_token) std::string(kislay_env_string("KISLAYPHP_AUTH_TOKEN", KISLAYPHP_EVENTBUS_G(auth_token) ? KISLAYPHP_EVENTBUS_G(auth_token) : ""));
     new (&server->auth_query_keys) std::vector<std::string>();
@@ -1414,6 +1416,18 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_socket_id, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_socket_set_threads, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, count, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_socket_set_max_payload, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, max, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_socket_on_auth, 0, 0, 1)
+    ZEND_ARG_CALLABLE_INFO(0, handler, 0)
+ZEND_END_ARG_INFO()
+
 PHP_METHOD(KislaySocketServer, __construct) {
     ZEND_PARSE_PARAMETERS_NONE();
 }
@@ -1544,6 +1558,68 @@ PHP_METHOD(KislaySocketServer, emitTo) {
     RETURN_TRUE;
 }
 
+
+PHP_METHOD(KislaySocketServer, setThreads) {
+    zend_long n;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(n)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    server->thread_count = (int)(n > 0 ? n : 1);
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislaySocketServer, clientCount) {
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    std::lock_guard<std::mutex> guard(server->lock);
+    RETURN_LONG((zend_long)server->clients.size());
+}
+
+PHP_METHOD(KislaySocketServer, roomCount) {
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    std::lock_guard<std::mutex> guard(server->lock);
+    std::unordered_set<std::string> all_rooms;
+    for (auto &kv : server->clients) {
+        auto it = server->rooms.begin();
+        for (; it != server->rooms.end(); ++it) {
+            if (it->second.count(kv.first)) all_rooms.insert(it->first);
+        }
+    }
+    RETURN_LONG((zend_long)all_rooms.size());
+}
+
+PHP_METHOD(KislaySocketServer, getClients) {
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    array_init(return_value);
+    std::lock_guard<std::mutex> guard(server->lock);
+    for (auto &kv : server->clients) {
+        add_next_index_string(return_value, kv.first.c_str());
+    }
+}
+
+PHP_METHOD(KislaySocketServer, setMaxPayload) {
+    zend_long max;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(max)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    server->max_payload = (size_t)(max > 0 ? max : 0);
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislaySocketServer, onAuth) {
+    zval *cb;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(cb)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    // Store auth handler — reuse handlers map with special key
+    zval copy;
+    ZVAL_COPY(&copy, cb);
+    server->handlers["__auth__"] = copy;
+    RETURN_TRUE;
+}
+
 PHP_METHOD(KislaySocketServer, listen) {
     char *host = nullptr;
     size_t host_len = 0;
@@ -1574,8 +1650,15 @@ PHP_METHOD(KislaySocketServer, listen) {
     std::string opt_port = listen_addr;
     options.push_back("listening_ports");
     options.push_back(opt_port.c_str());
+    // Dynamic thread count: env var > explicit setThreads() > default 4
+    int _thread_count = 4;
+    const char *_env_threads = getenv("KISLAYPHP_EVENTBUS_THREADS");
+    if (_env_threads && atoi(_env_threads) > 0) _thread_count = atoi(_env_threads);
+    if (server->thread_count > 0) _thread_count = server->thread_count;
+    static std::string _thread_count_str; // kept alive for mg_start
+    _thread_count_str = std::to_string(_thread_count);
     options.push_back("num_threads");
-    options.push_back("1");
+    options.push_back(_thread_count_str.c_str());
     options.push_back(nullptr);
 
     server->ctx = mg_start(nullptr, server, options.data());
@@ -1852,13 +1935,19 @@ PHP_METHOD(KislaySocketClient, reply) {
 }
 
 static const zend_function_entry kislay_socket_server_methods[] = {
-    PHP_ME(KislaySocketServer, __construct, arginfo_kislay_socket_void, ZEND_ACC_PUBLIC)
-    PHP_ME(KislaySocketServer, on, arginfo_kislay_socket_on, ZEND_ACC_PUBLIC)
-    PHP_ME(KislaySocketServer, emit, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
-    PHP_ME(KislaySocketServer, publish, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
-    PHP_ME(KislaySocketServer, send, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
-    PHP_ME(KislaySocketServer, emitTo, arginfo_kislay_socket_emit_room, ZEND_ACC_PUBLIC)
-    PHP_ME(KislaySocketServer, listen, arginfo_kislay_socket_listen, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, __construct,  arginfo_kislay_socket_void,      ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, on,           arginfo_kislay_socket_on,        ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, emit,         arginfo_kislay_socket_emit,      ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, publish,      arginfo_kislay_socket_emit,      ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, send,         arginfo_kislay_socket_emit,      ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, emitTo,       arginfo_kislay_socket_emit_room, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, listen,       arginfo_kislay_socket_listen,    ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, setThreads,   arginfo_kislay_socket_set_threads, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, clientCount,  arginfo_kislay_socket_void,      ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, roomCount,    arginfo_kislay_socket_void,      ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, getClients,   arginfo_kislay_socket_void,      ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, setMaxPayload,arginfo_kislay_socket_set_max_payload, ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, onAuth,       arginfo_kislay_socket_on_auth,   ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
