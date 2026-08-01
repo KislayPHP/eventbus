@@ -13,8 +13,15 @@ if test "$PHP_KISLAYPHP_EVENTBUS" != "no"; then
   PHP_ADD_LIBRARY(stdc++,, KISLAYPHP_EVENTBUS_SHARED_LIBADD)
   PHP_SUBST(KISLAYPHP_EVENTBUS_SHARED_LIBADD)
 
-  CFLAGS="$CFLAGS -DOPENSSL_API_3_0"
-  CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0"
+  dnl USE_WEBSOCKET/NO_SSL_DL: see kislayphp/socket's config.m4 for the full
+  dnl explanation (same vendored civetweb.c, same two bugs) - without
+  dnl USE_WEBSOCKET every WS upgrade silently gets no response at all;
+  dnl without NO_SSL_DL, civetweb's own OpenSSL dlopen/dlsym table is never
+  dnl populated for a plain-HTTP server, and the SHA1 digest needed for the
+  dnl handshake calls through a NULL function pointer, segfaulting on the
+  dnl very first upgrade attempt.
+  CFLAGS="$CFLAGS -DOPENSSL_API_3_0 -DUSE_WEBSOCKET -DNO_SSL_DL"
+  CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0 -DUSE_WEBSOCKET -DNO_SSL_DL"
   if test -f ../rpc/gen/platform.pb.cc; then
     RPC_GEN_DIR=`pwd`/../rpc/gen
     PHP_ADD_INCLUDE($RPC_GEN_DIR)
