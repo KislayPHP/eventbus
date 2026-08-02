@@ -20,8 +20,16 @@ if test "$PHP_KISLAYPHP_EVENTBUS" != "no"; then
   dnl populated for a plain-HTTP server, and the SHA1 digest needed for the
   dnl handshake calls through a NULL function pointer, segfaulting on the
   dnl very first upgrade attempt.
-  CFLAGS="$CFLAGS -DOPENSSL_API_3_0 -DUSE_WEBSOCKET -DNO_SSL_DL"
-  CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0 -DUSE_WEBSOCKET -DNO_SSL_DL"
+  dnl -fvisibility=hidden + -DCIVETWEB_API=: see kislayphp/socket's config.m4
+  dnl for the full explanation. civetweb.c exports ~200 non-static C
+  dnl functions with default visibility (civetweb.h's CIVETWEB_API macro
+  dnl re-asserts this regardless of -fvisibility unless pre-defined empty);
+  dnl PHP extension bundles link -flat_namespace here, so 2+ co-loaded
+  dnl extensions that each vendor civetweb.c can silently shadow each
+  dnl other's compiled copy. get_module() stays exported via
+  dnl ZEND_GET_MODULE's own ZEND_DLEXPORT regardless of this flag.
+  CFLAGS="$CFLAGS -DOPENSSL_API_3_0 -DUSE_WEBSOCKET -DNO_SSL_DL -fvisibility=hidden -DCIVETWEB_API="
+  CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0 -DUSE_WEBSOCKET -DNO_SSL_DL -fvisibility=hidden -DCIVETWEB_API="
   if test -f ../rpc/gen/platform.pb.cc; then
     RPC_GEN_DIR=`pwd`/../rpc/gen
     PHP_ADD_INCLUDE($RPC_GEN_DIR)
