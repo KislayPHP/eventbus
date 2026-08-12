@@ -242,6 +242,13 @@ struct kislay_socket_session {
     kislay_socket_pending_binary pending;
     std::chrono::steady_clock::time_point last_ping;
     std::chrono::steady_clock::time_point last_pong;
+    // Captured from whichever request established this session (the initial
+    // polling GET, or the WS upgrade request if the client connects via
+    // WebSocket transport from the start) - handed to a registered onAuth()
+    // callback when the "connection" event fires. See kislay_capture_handshake.
+    std::string handshake_path;
+    std::string handshake_query_string;
+    std::vector<std::pair<std::string, std::string>> handshake_headers;
 };
 
 struct kislay_pending_call {
@@ -250,6 +257,17 @@ struct kislay_pending_call {
     zval handler;
     zval payload;
     bool has_payload;
+    // true unless this pending call exists solely to run the onAuth() gate
+    // on a "connection" event for which no on('connection', ...) handler is
+    // registered - see kislay_queue_event_locked.
+    bool has_handler = true;
+    // Set (only ever for event == "connection") when onAuth() has a
+    // registered callback that must run and gate the connection - see
+    // kislay_run_pending_calls.
+    bool check_auth = false;
+    std::string handshake_path;
+    std::string handshake_query_string;
+    std::vector<std::pair<std::string, std::string>> handshake_headers;
 };
 
 typedef struct _php_kislay_socket_server_t {
@@ -453,6 +471,31 @@ static void kislay_parse_query(const char *query, std::unordered_map<std::string
     }
 }
 
+// Snapshots the handshake request (path/query/headers) onto a freshly
+// created session so a later onAuth() callback - fired when the "connection"
+// event reaches kislay_run_pending_calls - can see exactly what the client
+// sent when it connected. Must be called while the request's mg_request_info
+// is still valid (i.e. from within the civetweb handler itself).
+static void kislay_capture_handshake(const struct mg_request_info *ri, kislay_socket_session &session) {
+    if (ri == nullptr) {
+        return;
+    }
+    if (ri->local_uri_raw != nullptr) {
+        session.handshake_path = ri->local_uri_raw;
+    } else if (ri->local_uri != nullptr) {
+        session.handshake_path = ri->local_uri;
+    }
+    session.handshake_query_string = ri->query_string ? ri->query_string : "";
+    session.handshake_headers.clear();
+    for (int i = 0; i < ri->num_headers; ++i) {
+        const char *name = ri->http_headers[i].name;
+        const char *value = ri->http_headers[i].value;
+        if (name != nullptr && value != nullptr) {
+            session.handshake_headers.emplace_back(name, value);
+        }
+    }
+}
+
 static std::string kislay_engineio_encode_payload(const std::vector<std::string> &packets) {
     if (packets.empty()) {
         return "";
@@ -469,6 +512,24 @@ static std::string kislay_engineio_encode_payload(const std::vector<std::string>
     return out;
 }
 
+// FIXED (2026-08-12) - the root cause of eventbus's custom-event-dispatch
+// bug (see memory eventbus_custom_event_bug.md): this used to scan the
+// ENTIRE payload for a ':' character ANYWHERE to decide whether the body
+// uses the legacy Engine.IO length-prefixed batch format
+// ("<len>:<packet><len>:<packet>..."). A single-packet event body almost
+// always contains a ':' somewhere in its own JSON payload (e.g.
+// {"msg":"hello"} has one right in the key/value syntax) - so EVERY real
+// custom event with any object/string payload got wrongly routed into the
+// batch-format branch. There, "42" (the literal Engine.IO+Socket.IO event
+// packet prefix - '4' message, '2' event) was misread as a *length prefix*
+// of 42, the parser then expected a ':' immediately after it, found '['
+// instead, and silently bailed with zero packets - the event was dropped
+// before ever reaching dispatch. `on('connection')`/`on('disconnect')`
+// were unaffected because their packets ("40"/"41") contain no ':' at all.
+// Fixed to match kislayphp/socket's (the working sibling extension) prefix
+// probe: only treat the payload as length-prefixed batch format if it
+// STARTS WITH digits immediately followed by ':' at that exact position,
+// not "contains a colon anywhere".
 static std::vector<std::string> kislay_engineio_parse_payload(const char *data, size_t data_len) {
     std::vector<std::string> packets;
     if (data_len == 0) {
@@ -476,15 +537,12 @@ static std::vector<std::string> kislay_engineio_parse_payload(const char *data, 
     }
 
     size_t idx = 0;
-    bool has_colon = false;
-    for (size_t i = 0; i < data_len; ++i) {
-        if (data[i] == ':') {
-            has_colon = true;
-            break;
-        }
+    size_t probe = 0;
+    while (probe < data_len && data[probe] >= '0' && data[probe] <= '9') {
+        ++probe;
     }
 
-    if (!has_colon) {
+    if (probe == 0 || probe >= data_len || data[probe] != ':') {
         packets.emplace_back(data, data_len);
         return packets;
     }
@@ -1150,6 +1208,7 @@ static int kislay_http_handler(struct mg_connection *conn, void *cbdata) {
             ZVAL_UNDEF(&session.pending.payload);
             session.last_ping = std::chrono::steady_clock::now();
             session.last_pong = session.last_ping;
+            kislay_capture_handshake(ri, session);
             server->sessions.emplace(sid, session);
 
             std::string open_packet = kislay_build_open_packet(sid, server->ping_interval_ms, server->ping_timeout_ms, server->max_payload,
@@ -1307,6 +1366,7 @@ static void kislay_ws_ready_handler(struct mg_connection *conn, void *cbdata) {
         ZVAL_UNDEF(&session.pending.payload);
         session.last_ping = std::chrono::steady_clock::now();
         session.last_pong = session.last_ping;
+        kislay_capture_handshake(ri, session);
         server->sessions.emplace(sid, session);
 
         std::string open_packet = kislay_build_open_packet(sid, server->ping_interval_ms, server->ping_timeout_ms, server->max_payload,
@@ -1326,6 +1386,7 @@ static void kislay_ws_ready_handler(struct mg_connection *conn, void *cbdata) {
             ZVAL_UNDEF(&session.pending.payload);
             session.last_ping = std::chrono::steady_clock::now();
             session.last_pong = session.last_ping;
+            kislay_capture_handshake(ri, session);
             server->sessions.emplace(sid, session);
         } else {
             session_it->second.ws_conn = conn;
