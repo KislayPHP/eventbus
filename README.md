@@ -77,7 +77,7 @@ $server->listen('0.0.0.0', 3000, '/socket.io/');
 - `onWithAck(string $event, callable $handler): bool`
 - `getClients(): array`
 - `setMaxPayload(int $bytes): bool`
-- `namespace(string $ns): Kislay\EventBus\Namespace`
+- `namespace(string $name): Kislay\EventBus\EventNamespace`
 
 ### `Kislay\EventBus\Socket`
 
@@ -90,12 +90,28 @@ $server->listen('0.0.0.0', 3000, '/socket.io/');
 - `reply(string $event, mixed $data): bool`
 - `emitTo(string $room, string $event, mixed $data): bool`
 
+### `Kislay\EventBus\EventNamespace`
+
+Returned by `Server::namespace()`. A **documented subset** of full
+Socket.IO namespaces - see `docs.md` for exactly what is and isn't covered
+(notably: no per-namespace connection membership, rooms are shared across
+namespaces, no namespace-specific auth or acks).
+
+- `name(): string`
+- `on(string $event, callable $handler): bool`
+- `emit(string $event, mixed $data): bool`
+- `emitTo(string $room, string $event, mixed $data): bool`
+
 Semantics:
 
 - `Server::emit()` broadcasts to all connected clients.
 - `Socket::emit()` sends only to the current client.
 - `Socket::reply()` is the semantic alias for per-client emit.
 - `Socket::emitTo()` broadcasts to a room.
+- `onWithAck()` is like `on()`, but the handler's return value is sent back
+  to the sending client as a Socket.IO ACK packet when the incoming packet
+  carried an ack id - see `docs.md` for the exact wire format and scope
+  (default namespace only, no binary-attachment events).
 
 Legacy aliases under `KislayPHP\EventBus\...` remain available.
 

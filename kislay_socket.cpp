@@ -184,6 +184,7 @@ static void kislay_parse_transports(const std::string &value, std::unordered_set
 
 static zend_class_entry *kislay_socket_server_ce;
 static zend_class_entry *kislay_socket_client_ce;
+static zend_class_entry *kislay_socket_namespace_ce;
 
 ZEND_BEGIN_MODULE_GLOBALS(kislayphp_eventbus)
     zend_long ping_interval_ms;
@@ -265,16 +266,49 @@ struct kislay_pending_call {
     // registered callback that must run and gate the connection - see
     // kislay_run_pending_calls.
     bool check_auth = false;
+    // Set when the incoming EVENT packet carried a Socket.IO ack id AND the
+    // handler for this event was registered via onWithAck() (not plain
+    // on()). When true, kislay_run_pending_calls sends the handler's return
+    // value back to the client as a "43<ack_id>[...]" ACK packet. Only
+    // supported for the default namespace and for non-binary event packets;
+    // see docs.md for the documented scope.
+    bool has_ack = false;
+    zend_long ack_id = 0;
     std::string handshake_path;
     std::string handshake_query_string;
     std::vector<std::pair<std::string, std::string>> handshake_headers;
 };
 
+// IMPORTANT: `zend_object std` is deliberately the LAST member of this
+// struct, not the first - see the (long) explanatory comment above
+// php_kislay_socket_client_t below for why. TL;DR: `zend_object` ends with
+// its own embedded `zval properties_table[1]` placeholder, and
+// zend_object_properties_size(ce) is defined to return sizeof(zval)*(-1)
+// (an intentional size_t underflow) for a class with zero declared
+// properties, i.e. exactly "minus one zval" - `ecalloc(1, sizeof(struct) +
+// zend_object_properties_size(ce))` only computes the correct total
+// allocation size when that trailing placeholder zval is the very last
+// thing in the allocation, so subtracting it back out trims exactly the
+// unused slot. With `zend_object` first, this same arithmetic instead
+// silently under-allocates the WHOLE struct by sizeof(zval) (16 bytes),
+// corrupting whatever the last 16 bytes of the struct happen to be.
 typedef struct _php_kislay_socket_server_t {
-    zend_object std;
     struct mg_context *ctx;
     std::string path;
     std::unordered_map<std::string, zval> handlers;
+    // Event names registered via onWithAck() (subset of handlers' keys) -
+    // an incoming EVENT packet only triggers an ACK reply if its event name
+    // is in this set, even if the packet itself carried an ack id. See
+    // KislaySocketServer::onWithAck and kislay_queue_event_locked.
+    std::unordered_set<std::string> ack_events;
+    // Namespace-scoped handlers: ns_handlers["/admin"]["chat"] = handler.
+    // Populated by KislaySocketNamespace::on(); dispatched from
+    // kislay_queue_ns_event_locked when an incoming packet carries a
+    // "/name," namespace prefix. The default namespace ("/") is NOT stored
+    // here - it continues to use `handlers` above, unchanged, so existing
+    // on()/emit() behavior is byte-for-byte identical to before namespace()
+    // existed. See docs.md for the documented scope/limits of this feature.
+    std::unordered_map<std::string, std::unordered_map<std::string, zval>> ns_handlers;
     std::unordered_map<std::string, kislay_socket_client_state> clients;
     std::unordered_map<struct mg_connection *, std::string> conn_to_sid;
     std::unordered_map<std::string, std::unordered_set<std::string>> rooms;
@@ -294,16 +328,38 @@ typedef struct _php_kislay_socket_server_t {
     int ping_timeout_ms;
     size_t max_payload;
     int thread_count; // 0 = use env/default
+    zend_object std;
 } php_kislay_socket_server_t;
 
+// See the comment above php_kislay_socket_server_t: `zend_object std` MUST
+// be the LAST member of a custom object struct for
+// `ecalloc(1, sizeof(struct) + zend_object_properties_size(ce))` to compute
+// the correct allocation size for a class with zero declared PHP
+// properties (which all three classes in this file have). Verified by
+// reproducing a real `zend_mm_heap corrupted` crash with `std` first
+// (detected, as heap corruption often is, at a LATER unrelated allocation -
+// see kislay_run_pending_calls's object_init_ex call - not at the point of
+// the actual under-allocation) and confirming it goes away with `std` last.
 typedef struct _php_kislay_socket_client_t {
-    zend_object std;
     std::string sid;
     php_kislay_socket_server_t *server;
+    zend_object std;
 } php_kislay_socket_client_t;
+
+// Backs Kislay\EventBus\EventNamespace, returned by Server::namespace().
+// Non-owning `server` pointer, same lifetime pattern as
+// php_kislay_socket_client_t::server above - the namespace object is only
+// meaningful while the Server that created it is alive. See the
+// `zend_object std` ordering comment above php_kislay_socket_server_t.
+typedef struct _php_kislay_socket_namespace_t {
+    std::string ns;
+    php_kislay_socket_server_t *server;
+    zend_object std;
+} php_kislay_socket_namespace_t;
 
 static zend_object_handlers kislay_socket_server_handlers;
 static zend_object_handlers kislay_socket_client_handlers;
+static zend_object_handlers kislay_socket_namespace_handlers;
 
 static inline php_kislay_socket_server_t *php_kislay_socket_server_from_obj(zend_object *obj) {
     return reinterpret_cast<php_kislay_socket_server_t *>(
@@ -315,6 +371,11 @@ static inline php_kislay_socket_client_t *php_kislay_socket_client_from_obj(zend
         reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_socket_client_t, std));
 }
 
+static inline php_kislay_socket_namespace_t *php_kislay_socket_namespace_from_obj(zend_object *obj) {
+    return reinterpret_cast<php_kislay_socket_namespace_t *>(
+        reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_socket_namespace_t, std));
+}
+
 static zend_object *kislay_socket_server_create_object(zend_class_entry *ce) {
     php_kislay_socket_server_t *server = static_cast<php_kislay_socket_server_t *>(
         ecalloc(1, sizeof(php_kislay_socket_server_t) + zend_object_properties_size(ce)));
@@ -322,6 +383,8 @@ static zend_object *kislay_socket_server_create_object(zend_class_entry *ce) {
     object_properties_init(&server->std, ce);
     new (&server->path) std::string();
     new (&server->handlers) std::unordered_map<std::string, zval>();
+    new (&server->ack_events) std::unordered_set<std::string>();
+    new (&server->ns_handlers) std::unordered_map<std::string, std::unordered_map<std::string, zval>>();
     new (&server->clients) std::unordered_map<std::string, kislay_socket_client_state>();
     new (&server->conn_to_sid) std::unordered_map<struct mg_connection *, std::string>();
     new (&server->rooms) std::unordered_map<std::string, std::unordered_set<std::string>>();
@@ -374,6 +437,11 @@ static void kislay_socket_server_free_obj(zend_object *object) {
     for (auto &handler : server->handlers) {
         zval_ptr_dtor(&handler.second);
     }
+    for (auto &ns_entry : server->ns_handlers) {
+        for (auto &handler_entry : ns_entry.second) {
+            zval_ptr_dtor(&handler_entry.second);
+        }
+    }
     if (server->ctx != nullptr) {
         mg_stop(server->ctx);
         server->ctx = nullptr;
@@ -387,6 +455,8 @@ static void kislay_socket_server_free_obj(zend_object *object) {
     server->rooms.~unordered_map();
     server->conn_to_sid.~unordered_map();
     server->clients.~unordered_map();
+    server->ns_handlers.~unordered_map();
+    server->ack_events.~unordered_set();
     server->handlers.~unordered_map();
     server->path.~basic_string();
     server->auth_token.~basic_string();
@@ -414,6 +484,23 @@ static void kislay_socket_client_free_obj(zend_object *object) {
     php_kislay_socket_client_t *client = php_kislay_socket_client_from_obj(object);
     client->sid.~basic_string();
     zend_object_std_dtor(&client->std);
+}
+
+static zend_object *kislay_socket_namespace_create_object(zend_class_entry *ce) {
+    php_kislay_socket_namespace_t *ns_obj = static_cast<php_kislay_socket_namespace_t *>(
+        ecalloc(1, sizeof(php_kislay_socket_namespace_t) + zend_object_properties_size(ce)));
+    zend_object_std_init(&ns_obj->std, ce);
+    object_properties_init(&ns_obj->std, ce);
+    new (&ns_obj->ns) std::string("/");
+    ns_obj->server = nullptr;
+    ns_obj->std.handlers = &kislay_socket_namespace_handlers;
+    return &ns_obj->std;
+}
+
+static void kislay_socket_namespace_free_obj(zend_object *object) {
+    php_kislay_socket_namespace_t *ns_obj = php_kislay_socket_namespace_from_obj(object);
+    ns_obj->ns.~basic_string();
+    zend_object_std_dtor(&ns_obj->std);
 }
 
 static bool kislay_is_callable(zval *callable) {
@@ -668,7 +755,9 @@ static bool kislay_send_socketio_packet(php_kislay_socket_server_t *server, cons
     return kislay_engineio_send_packet_to_sid(server, sid, engine_packet);
 }
 
-static bool kislay_send_socketio_event(php_kislay_socket_server_t *server, const std::string &sid, const std::string &event, zval *data) {
+// `ns` is the Socket.IO namespace to wire-prefix the packet with ("/" =
+// default namespace = no prefix, exactly as before namespace() existed).
+static bool kislay_send_socketio_event(php_kislay_socket_server_t *server, const std::string &sid, const std::string &event, zval *data, const std::string &ns = "/") {
     zval payload;
     array_init(&payload);
     add_next_index_string(&payload, event.c_str());
@@ -686,6 +775,9 @@ static bool kislay_send_socketio_event(php_kislay_socket_server_t *server, const
     smart_str_0(&buf);
 
     std::string packet = "2";
+    if (!ns.empty() && ns != "/") {
+        packet += ns + ",";
+    }
     if (buf.s != nullptr) {
         packet.append(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
     }
@@ -696,13 +788,48 @@ static bool kislay_send_socketio_event(php_kislay_socket_server_t *server, const
     return true;
 }
 
-static void kislay_broadcast(php_kislay_socket_server_t *server, const std::string &event, zval *data) {
+// Sends a Socket.IO ACK packet ("43<ack_id>[retval]") to a single client in
+// response to an EVENT packet that carried an ack id and whose handler was
+// registered via onWithAck(). `retval` may be nullptr (handler returned
+// void/null), in which case the ack payload is `[null]`. Caller must hold
+// server->lock (matches every other kislay_send_socketio_* call site).
+static void kislay_send_ack(php_kislay_socket_server_t *server, const std::string &sid, zend_long ack_id, zval *retval) {
+    zval payload;
+    array_init(&payload);
+    if (retval != nullptr) {
+        zval copy;
+        ZVAL_COPY(&copy, retval);
+        add_next_index_zval(&payload, &copy);
+    } else {
+        add_next_index_null(&payload);
+    }
+
+    smart_str buf = {0};
+    if (php_json_encode(&buf, &payload, 0) == SUCCESS) {
+        smart_str_0(&buf);
+        std::string packet = "3" + std::to_string(static_cast<long long>(ack_id));
+        if (buf.s != nullptr) {
+            packet.append(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+        }
+        kislay_send_socketio_packet(server, sid, packet);
+    }
+    smart_str_free(&buf);
+    zval_ptr_dtor(&payload);
+}
+
+static void kislay_broadcast(php_kislay_socket_server_t *server, const std::string &event, zval *data, const std::string &ns = "/") {
     for (const auto &entry : server->clients) {
-        kislay_send_socketio_event(server, entry.first, event, data);
+        kislay_send_socketio_event(server, entry.first, event, data, ns);
     }
 }
 
-static void kislay_emit_room(php_kislay_socket_server_t *server, const std::string &room, const std::string &event, zval *data) {
+// NOTE: rooms are server-wide, not namespace-scoped, in this implementation
+// - Socket::join()/leave() have no namespace context (a single Socket
+// object is shared across the default connection and any namespaces it
+// participates in). emitTo() from a namespace-scoped
+// Kislay\EventBus\EventNamespace still only wire-prefixes the packet; room
+// membership itself is shared across all namespaces. See docs.md.
+static void kislay_emit_room(php_kislay_socket_server_t *server, const std::string &room, const std::string &event, zval *data, const std::string &ns = "/") {
     auto it = server->rooms.find(room);
     if (it == server->rooms.end()) {
         return;
@@ -710,7 +837,7 @@ static void kislay_emit_room(php_kislay_socket_server_t *server, const std::stri
     for (const auto &sid : it->second) {
         auto cit = server->clients.find(sid);
         if (cit != server->clients.end()) {
-            kislay_send_socketio_event(server, cit->first, event, data);
+            kislay_send_socketio_event(server, cit->first, event, data, ns);
         }
     }
 }
@@ -720,7 +847,10 @@ static bool kislay_parse_socketio_event_packet(const char *data,
                                                std::string &event_out,
                                                zval *data_out,
                                                int *attachments_out,
-                                               bool *binary_out) {
+                                               bool *binary_out,
+                                               bool *has_ack_out = nullptr,
+                                               zend_long *ack_id_out = nullptr,
+                                               std::string *ns_out = nullptr) {
     if (data_len == 0) {
         return false;
     }
@@ -762,6 +892,8 @@ static bool kislay_parse_socketio_event_packet(const char *data,
         }
     }
 
+    // Optional namespace segment: "/admin," before the ack id / payload.
+    // Socket.IO wire format: <type>[<attachments>-][<namespace>,][<ack id>][<json>]
     if (offset < data_len && data[offset] == '/') {
         size_t comma = offset;
         while (comma < data_len && data[comma] != ',') {
@@ -770,11 +902,31 @@ static bool kislay_parse_socketio_event_packet(const char *data,
         if (comma >= data_len) {
             return false;
         }
+        if (ns_out != nullptr) {
+            ns_out->assign(data + offset, comma - offset);
+        }
         offset = comma + 1;
+    } else if (ns_out != nullptr) {
+        ns_out->assign("/");
     }
 
+    // Optional numeric ack id. Previously this loop just skipped past the
+    // digits and discarded them - now captured so onWithAck() can reply.
+    // See kislay_pending_call::has_ack / kislay_run_pending_calls.
+    size_t ack_start = offset;
     while (offset < data_len && data[offset] >= '0' && data[offset] <= '9') {
         offset++;
+    }
+    if (offset > ack_start) {
+        if (has_ack_out != nullptr) {
+            *has_ack_out = true;
+        }
+        if (ack_id_out != nullptr) {
+            *ack_id_out = static_cast<zend_long>(
+                std::strtoll(std::string(data + ack_start, offset - ack_start).c_str(), nullptr, 10));
+        }
+    } else if (has_ack_out != nullptr) {
+        *has_ack_out = false;
     }
 
     size_t json_pos = offset;
@@ -824,11 +976,52 @@ static void kislay_queue_event_locked(php_kislay_socket_server_t *server,
                                       const std::string &sid,
                                       const std::string &event,
                                       zval *payload,
-                                      std::vector<kislay_pending_call> &pending) {
+                                      std::vector<kislay_pending_call> &pending,
+                                      bool has_ack = false,
+                                      zend_long ack_id = 0) {
     // ZVAL_COPY below touches Zend refcounting; see kislay_socket_php_call_lock.
     std::lock_guard<std::recursive_mutex> php_guard(kislay_socket_php_call_lock);
     auto hit = server->handlers.find(event);
     if (hit == server->handlers.end()) {
+        return;
+    }
+
+    kislay_pending_call call;
+    call.event = event;
+    call.sid = sid;
+    ZVAL_COPY(&call.handler, &hit->second);
+    if (payload != nullptr) {
+        ZVAL_COPY(&call.payload, payload);
+        call.has_payload = true;
+    } else {
+        ZVAL_UNDEF(&call.payload);
+        call.has_payload = false;
+    }
+    // Only actually ack if the packet carried an ack id AND this event's
+    // handler was registered via onWithAck() (not plain on()).
+    call.has_ack = has_ack && server->ack_events.count(event) > 0;
+    call.ack_id = ack_id;
+    pending.push_back(std::move(call));
+}
+
+// Namespace-scoped counterpart of kislay_queue_event_locked - dispatches to
+// a handler registered via Kislay\EventBus\EventNamespace::on() instead of
+// the default-namespace `handlers` map. See ns_handlers field comment.
+// Ack support is intentionally not wired up for namespace-scoped events in
+// this pass - see docs.md for the documented scope of namespace().
+static void kislay_queue_ns_event_locked(php_kislay_socket_server_t *server,
+                                         const std::string &sid,
+                                         const std::string &ns,
+                                         const std::string &event,
+                                         zval *payload,
+                                         std::vector<kislay_pending_call> &pending) {
+    std::lock_guard<std::recursive_mutex> php_guard(kislay_socket_php_call_lock);
+    auto nsit = server->ns_handlers.find(ns);
+    if (nsit == server->ns_handlers.end()) {
+        return;
+    }
+    auto hit = nsit->second.find(event);
+    if (hit == nsit->second.end()) {
         return;
     }
 
@@ -874,6 +1067,14 @@ static void kislay_run_pending_calls(php_kislay_socket_server_t *server,
         zval retval;
         kislay_call_php(&call.handler, one_arg ? 1 : 2, args, &retval);
 
+        if (call.has_ack) {
+            // kislay_send_socketio_* mutates server->sessions - must hold
+            // server->lock, same as every other send call site (see e.g.
+            // KislaySocketClient::emit). php_call_lock alone isn't enough.
+            std::lock_guard<std::mutex> send_guard(server->lock);
+            kislay_send_ack(server, call.sid, call.ack_id, Z_ISUNDEF(retval) ? nullptr : &retval);
+        }
+
         zval_ptr_dtor(&args[0]);
         if (!one_arg) {
             zval_ptr_dtor(&args[1]);
@@ -918,20 +1119,59 @@ static void kislay_handle_socketio_packet(php_kislay_socket_server_t *server,
 
     char type = packet[0];
     if (type == '0') {
+        // Optional namespace prefix on CONNECT: "0/admin," (default
+        // namespace has no prefix - "0" alone, unchanged from before).
+        std::string ns = "/";
+        size_t body_off = 1;
+        if (body_off < packet.size() && packet[body_off] == '/') {
+            size_t comma = packet.find(',', body_off);
+            if (comma != std::string::npos) {
+                ns = packet.substr(body_off, comma - body_off);
+                body_off = comma + 1;
+            }
+        }
+
         if (server->clients.find(sid) == server->clients.end()) {
             kislay_socket_client_state state;
             state.conn = session.ws_conn;
             state.sid = sid;
             server->clients.emplace(sid, state);
         }
-        kislay_send_socketio_packet(server, sid, "0");
-        kislay_queue_event_locked(server, sid, "connection", nullptr, pending);
+        std::string ack_packet = "0";
+        if (ns != "/") {
+            ack_packet += ns + ",";
+        }
+        kislay_send_socketio_packet(server, sid, ack_packet);
+        if (ns == "/") {
+            kislay_queue_event_locked(server, sid, "connection", nullptr, pending);
+        } else {
+            kislay_queue_ns_event_locked(server, sid, ns, "connection", nullptr, pending);
+        }
         return;
     }
 
     if (type == '1') {
-        kislay_queue_event_locked(server, sid, "disconnect", nullptr, pending);
-        kislay_remove_client(server, sid);
+        // Optional namespace prefix on DISCONNECT: "1/admin,". A namespaced
+        // disconnect only leaves that namespace (fires its "disconnect"
+        // handler) - it does NOT tear down the underlying connection/session,
+        // since rooms/clients here are shared across namespaces. A bare "1"
+        // (default namespace) keeps the original, unchanged behavior of
+        // tearing down the whole client.
+        std::string ns = "/";
+        size_t body_off = 1;
+        if (body_off < packet.size() && packet[body_off] == '/') {
+            size_t comma = packet.find(',', body_off);
+            if (comma != std::string::npos) {
+                ns = packet.substr(body_off, comma - body_off);
+                body_off = comma + 1;
+            }
+        }
+        if (ns == "/") {
+            kislay_queue_event_locked(server, sid, "disconnect", nullptr, pending);
+            kislay_remove_client(server, sid);
+        } else {
+            kislay_queue_ns_event_locked(server, sid, ns, "disconnect", nullptr, pending);
+        }
         return;
     }
 
@@ -944,8 +1184,11 @@ static void kislay_handle_socketio_packet(php_kislay_socket_server_t *server,
     ZVAL_UNDEF(&payload);
     int attachments = 0;
     bool is_binary = false;
+    bool has_ack = false;
+    zend_long ack_id = 0;
+    std::string ns = "/";
 
-    if (!kislay_parse_socketio_event_packet(packet.data(), packet.size(), event, &payload, &attachments, &is_binary)) {
+    if (!kislay_parse_socketio_event_packet(packet.data(), packet.size(), event, &payload, &attachments, &is_binary, &has_ack, &ack_id, &ns)) {
         if (!Z_ISUNDEF(payload)) {
             zval_ptr_dtor(&payload);
         }
@@ -953,6 +1196,11 @@ static void kislay_handle_socketio_packet(php_kislay_socket_server_t *server,
     }
 
     if (is_binary && attachments > 0) {
+        // NOTE: ack ids and namespace prefixes are not carried through the
+        // binary-attachment reassembly path (kislay_handle_socketio_binary)
+        // - a binary event with an ack id will not receive an ACK reply,
+        // and a namespaced binary event is dispatched as if it were on the
+        // default namespace. See docs.md for the documented scope.
         kislay_clear_pending(session.pending);
         session.pending.active = true;
         session.pending.expected = attachments;
@@ -969,11 +1217,21 @@ static void kislay_handle_socketio_packet(php_kislay_socket_server_t *server,
         return;
     }
 
+    if (ns != "/") {
+        if (!Z_ISUNDEF(payload)) {
+            kislay_queue_ns_event_locked(server, sid, ns, event, &payload, pending);
+            zval_ptr_dtor(&payload);
+        } else {
+            kislay_queue_ns_event_locked(server, sid, ns, event, nullptr, pending);
+        }
+        return;
+    }
+
     if (!Z_ISUNDEF(payload)) {
-        kislay_queue_event_locked(server, sid, event, &payload, pending);
+        kislay_queue_event_locked(server, sid, event, &payload, pending, has_ack, ack_id);
         zval_ptr_dtor(&payload);
     } else {
-        kislay_queue_event_locked(server, sid, event, nullptr, pending);
+        kislay_queue_event_locked(server, sid, event, nullptr, pending, has_ack, ack_id);
     }
 }
 
@@ -1525,6 +1783,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_socket_on_auth, 0, 0, 1)
     ZEND_ARG_CALLABLE_INFO(0, handler, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_socket_namespace, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
 PHP_METHOD(KislaySocketServer, __construct) {
     ZEND_PARSE_PARAMETERS_NONE();
 }
@@ -1554,7 +1816,69 @@ PHP_METHOD(KislaySocketServer, on) {
     zval copy;
     ZVAL_COPY(&copy, handler);
     server->handlers[key] = copy;
+    // Registering a plain (non-ack) handler for an event that previously had
+    // onWithAck() semantics turns ack replies back off for it.
+    server->ack_events.erase(key);
     RETURN_TRUE;
+}
+
+// Like on(), but marks the event as ack-enabled: if an incoming EVENT
+// packet for this event carries a Socket.IO ack id (wire format
+// "42<id>[...]" instead of plain "42[...]"), the handler's return value is
+// JSON-encoded and sent back to that client as an ACK packet
+// ("43<id>[retval]") once the handler returns. See kislay_run_pending_calls
+// and kislay_send_ack. Scope: default namespace only, and not supported
+// together with binary-attachment events - see docs.md.
+PHP_METHOD(KislaySocketServer, onWithAck) {
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *handler = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(handler)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!kislay_is_callable(handler)) {
+        zend_throw_exception(zend_ce_exception, "Handler must be callable", 0);
+        RETURN_FALSE;
+    }
+
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    std::lock_guard<std::mutex> guard(server->lock);
+    std::string key(event, event_len);
+    auto it = server->handlers.find(key);
+    if (it != server->handlers.end()) {
+        zval_ptr_dtor(&it->second);
+        server->handlers.erase(it);
+    }
+    zval copy;
+    ZVAL_COPY(&copy, handler);
+    server->handlers[key] = copy;
+    server->ack_events.insert(key);
+    RETURN_TRUE;
+}
+
+// Returns a namespace-scoped view sharing this server's underlying
+// connections. See Kislay\EventBus\EventNamespace and docs.md for the
+// documented scope/limits of this feature (it is a useful subset of full
+// Socket.IO namespaces, not a complete implementation - see docs.md).
+PHP_METHOD(KislaySocketServer, namespace) {
+    char *name = nullptr;
+    size_t name_len = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(name, name_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_socket_server_t *server = php_kislay_socket_server_from_obj(Z_OBJ_P(getThis()));
+    std::string ns_name(name, name_len);
+    if (ns_name.empty() || ns_name[0] != '/') {
+        ns_name = "/" + ns_name;
+    }
+
+    object_init_ex(return_value, kislay_socket_namespace_ce);
+    php_kislay_socket_namespace_t *ns_obj = php_kislay_socket_namespace_from_obj(Z_OBJ_P(return_value));
+    ns_obj->server = server;
+    ns_obj->ns = ns_name;
 }
 
 PHP_METHOD(KislaySocketServer, emit) {
@@ -2009,6 +2333,91 @@ PHP_METHOD(KislaySocketClient, send) {
     RETURN_TRUE;
 }
 
+PHP_METHOD(KislaySocketNamespace, name) {
+    php_kislay_socket_namespace_t *ns_obj = php_kislay_socket_namespace_from_obj(Z_OBJ_P(getThis()));
+    RETURN_STRINGL(ns_obj->ns.c_str(), ns_obj->ns.size());
+}
+
+PHP_METHOD(KislaySocketNamespace, on) {
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *handler = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(handler)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!kislay_is_callable(handler)) {
+        zend_throw_exception(zend_ce_exception, "Handler must be callable", 0);
+        RETURN_FALSE;
+    }
+
+    php_kislay_socket_namespace_t *ns_obj = php_kislay_socket_namespace_from_obj(Z_OBJ_P(getThis()));
+    if (ns_obj->server == nullptr) {
+        RETURN_FALSE;
+    }
+
+    std::lock_guard<std::mutex> guard(ns_obj->server->lock);
+    std::string key(event, event_len);
+    auto &handlers = ns_obj->server->ns_handlers[ns_obj->ns];
+    auto it = handlers.find(key);
+    if (it != handlers.end()) {
+        zval_ptr_dtor(&it->second);
+        handlers.erase(it);
+    }
+    zval copy;
+    ZVAL_COPY(&copy, handler);
+    handlers[key] = copy;
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislaySocketNamespace, emit) {
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *data = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_socket_namespace_t *ns_obj = php_kislay_socket_namespace_from_obj(Z_OBJ_P(getThis()));
+    if (ns_obj->server == nullptr) {
+        RETURN_FALSE;
+    }
+
+    std::lock_guard<std::mutex> guard(ns_obj->server->lock);
+    // Broadcasts to every connected socket, wire-prefixed with this
+    // namespace - this subset implementation does not track which clients
+    // have explicitly joined the namespace (no per-namespace CONNECT
+    // membership registry). See docs.md.
+    kislay_broadcast(ns_obj->server, std::string(event, event_len), data, ns_obj->ns);
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislaySocketNamespace, emitTo) {
+    char *room = nullptr;
+    size_t room_len = 0;
+    char *event = nullptr;
+    size_t event_len = 0;
+    zval *data = nullptr;
+    ZEND_PARSE_PARAMETERS_START(3, 3)
+        Z_PARAM_STRING(room, room_len)
+        Z_PARAM_STRING(event, event_len)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_socket_namespace_t *ns_obj = php_kislay_socket_namespace_from_obj(Z_OBJ_P(getThis()));
+    if (ns_obj->server == nullptr) {
+        RETURN_FALSE;
+    }
+
+    std::lock_guard<std::mutex> guard(ns_obj->server->lock);
+    // Rooms are shared server-wide across namespaces in this
+    // implementation - see kislay_emit_room's comment and docs.md.
+    kislay_emit_room(ns_obj->server, std::string(room, room_len), std::string(event, event_len), data, ns_obj->ns);
+    RETURN_TRUE;
+}
+
 PHP_METHOD(KislaySocketClient, reply) {
     char *event = nullptr;
     size_t event_len = 0;
@@ -2043,6 +2452,7 @@ PHP_METHOD(KislaySocketClient, reply) {
 static const zend_function_entry kislay_socket_server_methods[] = {
     PHP_ME(KislaySocketServer, __construct,  arginfo_kislay_socket_void,      ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, on,           arginfo_kislay_socket_on,        ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, onWithAck,    arginfo_kislay_socket_on,        ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, emit,         arginfo_kislay_socket_emit,      ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, publish,      arginfo_kislay_socket_emit,      ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, send,         arginfo_kislay_socket_emit,      ZEND_ACC_PUBLIC)
@@ -2054,6 +2464,7 @@ static const zend_function_entry kislay_socket_server_methods[] = {
     PHP_ME(KislaySocketServer, getClients,   arginfo_kislay_socket_void,      ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, setMaxPayload,arginfo_kislay_socket_set_max_payload, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketServer, onAuth,       arginfo_kislay_socket_on_auth,   ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketServer, namespace,    arginfo_kislay_socket_namespace, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -2066,6 +2477,14 @@ static const zend_function_entry kislay_socket_client_methods[] = {
     PHP_ME(KislaySocketClient, send, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketClient, reply, arginfo_kislay_socket_emit, ZEND_ACC_PUBLIC)
     PHP_ME(KislaySocketClient, emitTo, arginfo_kislay_socket_emit_room, ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
+static const zend_function_entry kislay_socket_namespace_methods[] = {
+    PHP_ME(KislaySocketNamespace, name,   arginfo_kislay_socket_id,        ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketNamespace, on,     arginfo_kislay_socket_on,        ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketNamespace, emit,   arginfo_kislay_socket_emit,      ZEND_ACC_PUBLIC)
+    PHP_ME(KislaySocketNamespace, emitTo, arginfo_kislay_socket_emit_room, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -2088,6 +2507,19 @@ PHP_MINIT_FUNCTION(kislayphp_eventbus) {
     std::memcpy(&kislay_socket_client_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_socket_client_handlers.offset = XtOffsetOf(php_kislay_socket_client_t, std);
     kislay_socket_client_handlers.free_obj = kislay_socket_client_free_obj;
+
+    // Note: docs previously (inaccurately) called this class
+    // "Kislay\EventBus\Namespace" - `namespace` is a reserved word in PHP
+    // and cannot be used as a class name (verified: `class Namespace {}`
+    // is a parse error), so the real class is EventNamespace. docs.md/
+    // README.md have been corrected to match.
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\EventBus", "EventNamespace", kislay_socket_namespace_methods);
+    kislay_socket_namespace_ce = zend_register_internal_class(&ce);
+    zend_register_class_alias("KislayPHP\\EventBus\\EventNamespace", kislay_socket_namespace_ce);
+    kislay_socket_namespace_ce->create_object = kislay_socket_namespace_create_object;
+    std::memcpy(&kislay_socket_namespace_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    kislay_socket_namespace_handlers.offset = XtOffsetOf(php_kislay_socket_namespace_t, std);
+    kislay_socket_namespace_handlers.free_obj = kislay_socket_namespace_free_obj;
 
     return SUCCESS;
 }
